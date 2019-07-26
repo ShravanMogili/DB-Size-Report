@@ -1,0 +1,44 @@
+SELECT      sys.databases.name
+            ,CONVERT(VARCHAR,SUM(size)*8/1024)+' MB' AS [Total disk space in MB],
+            CONVERT(VARCHAR,(SUM(size)*8/1024)/1024)+'GB' AS [Total disk space in GB]
+FROM        sys.databases 
+JOIN        sys.master_files
+ON          sys.databases.database_id=sys.master_files.database_id
+GROUP BY    sys.databases.name
+ORDER BY    sys.databases.name
+go
+
+
+--T-SQL to find out Space by File Group
+
+
+SELECT
+ fg.groupname AS 'File Group',
+ Name, 
+ CONVERT (Decimal(15,2),ROUND(f.Size/128.000,2)) 
+  [Currently Allocated Space (MB)],
+ CONVERT (Decimal(15,2),
+ ROUND(FILEPROPERTY(f.Name,'SpaceUsed')/128.000,2))
+  AS [Space Used (MB)],
+ CONVERT (Decimal(15,2),
+ ROUND((f.Size-FILEPROPERTY(f.Name,'SpaceUsed'))/128.000,2))
+  AS [Available Space (MB)]
+FROM dbo.sysfiles f (NOLOCK)
+JOIN sysfilegroups fg (NOLOCK) ON f.groupid = fg.groupid
+ORDER BY fg.groupname
+
+
+
+
+
+--Returns the filename, size in MB and the name of the filegroup to which each file belongs:
+
+?????????SELECT sdf.name AS [FileName],
+size/128 AS [Size_in_MB],
+fg.name AS [File_Group_Name]
+FROM sys.database_files sdf
+INNER JOIN
+sys.filegroups fg
+ON sdf.data_space_id=fg.data_space_id
+
+

@@ -1,0 +1,185 @@
+http://www.sqlservercentral.com/scripts/Administration/117036/
+
+--
+-- Based on http://www.sqlservercentral.com/scripts/Databases/69634/
+--
+-- aparentelly doesn't suport DBs with spaces in the name or apostrophes
+-- added square brackets in the original code for enhancing
+--
+-- Adapted and tested for SQL Server 2012 / 2014
+--
+-- 07/10/2014 - Paulo A. Nascimento
+--
+
+USE tempdb
+GO
+
+if  ( (select count(*) from sys.objects where name like '#TMP_ServerDrive%') != 0 )
+	drop table #TMP_ServerDrive;
+if  ( (select count(*) from sys.objects where name like '#TMP_LogSpace%') != 0 )
+	drop table #TMP_LogSpace;
+if  ( (select count(*) from sys.objects where name like '#TMP_DBFileInfo%') != 0 )
+	drop table #TMP_DBFileInfo;
+if  ( (select count(*) from sys.objects where name like '#TMP_DataSpace%') != 0 )
+	drop table #TMP_DataSpace;
+if  ( (select count(*) from sys.objects where name like '#TMP_DB%') != 0 )
+	drop table #TMP_DB;
+
+SET NOCOUNT ON 
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+
+DECLARE @dbname VARCHAR(200),
+@sql NVARCHAR(4000)
+
+SET @sql = ''
+SET @dbname = ''
+
+CREATE TABLE #TMP_ServerDrive
+(
+	[DriveName] VARCHAR(5) PRIMARY KEY,
+	[FreeDriveSpace] BIGINT
+)
+
+INSERT INTO #TMP_ServerDrive
+	EXEC master..xp_fixeddrives
+
+
+CREATE TABLE #TMP_LogSpace
+( 
+	[DBName] VARCHAR(200) NOT NULL PRIMARY KEY,
+	[LogSize] MONEY NOT NULL,
+	[LogPercentUsed] MONEY NOT NULL,
+	[LogStatus] INT NOT NULL
+) 
+
+SELECT @sql = 'DBCC SQLPERF (LOGSPACE) WITH NO_INFOMSGS' 
+
+INSERT INTO #TMP_LogSpace
+	EXEC(@sql)
+
+CREATE TABLE #TMP_DBFileInfo 
+(
+	[dateTimeStamp] datetime default getdate(),
+	[DBName] VARCHAR(200),
+	[FileLogicalName] VARCHAR(200),
+	[FileID] INT NOT NULL,
+	[Filename] VARCHAR(250) NOT NULL,
+	[Filegroup] VARCHAR(100) NOT NULL,
+	[FileCurrentSize] BIGINT NOT NULL,
+	[FileMaxSize] VARCHAR(50) NOT NULL,
+	[FileGrowth] VARCHAR(50) NOT NULL,
+	[FileUsage] VARCHAR(50) NOT NULL,
+	[FileGrowthSize] BIGINT NOT NULL
+)
+
+CREATE TABLE #TMP_DB ( [DBName] VARCHAR(200) PRIMARY KEY ) 
+
+INSERT INTO #TMP_DB 
+-- SELECT DBName = LTRIM(RTRIM(name))
+SELECT DBName = name
+FROM master.dbo.sysdatabases 
+WHERE category IN ('0', '1','16')
+AND DATABASEPROPERTYEX(name, 'status') = 'ONLINE' 
+ORDER BY name 
+
+
+CREATE TABLE #TMP_DataSpace
+( 
+	[DBName] VARCHAR(200) NULL,
+	[Fileid] INT NOT NULL,
+	[FileGroup] INT NOT NULL,
+	[TotalExtents] MONEY NOT NULL,
+	[UsedExtents] MONEY NOT NULL,
+	[FileLogicalName] sysname NOT NULL,
+	[Filename] VARCHAR(1000) NOT NULL
+) 
+
+SELECT @dbname = MIN(dbname) FROM #TMP_DB 
+
+WHILE @dbname IS NOT NULL 
+BEGIN 
+	SET @sql = 'USE [' + @dbname + ']
+	INSERT INTO #TMP_DBFileInfo (
+	[DBName],
+	[FileLogicalName],
+	[FileID],
+	[Filename],
+	[Filegroup],
+	[FileCurrentSize],
+	[FileMaxSize],
+	[FileGrowth],
+	[FileUsage],
+	[FileGrowthSize])
+	SELECT DBName = ''[' + @dbname + ']'',
+	FileLogicalName = SF.name, 
+	FileID = SF.fileid, 
+	Filename = SF.filename, 
+	Filegroup = ISNULL(filegroup_name(SF.groupid),''''), 
+	FileCurrentSize = (SF.size * 8)/1024, 
+	FileMaxSize =CASE SF.maxsize WHEN -1 THEN N''Unlimited'' 
+	ELSE CONVERT(VARCHAR(15), (CAST(SF.maxsize AS BIGINT) * 8)/1024) + N'' MB'' END, 
+	FileGrowth = (case SF.status & 0x100000 when 0x100000 then 
+	convert(varchar(3), SF.growth) + N'' %'' 
+	else 
+	convert(varchar(15), ((CAST(SF.growth AS BIGINT) * 8)/1024)) + N'' MB'' end), 
+	FileUsage = (case WHEN SF.status & 0x40 = 0x40 then ''Log'' else ''Data'' end),
+	FileGrowthSize = CASE SF.status & 0x100000 WHEN 0x100000 THEN
+	((((CAST(SF.size AS BIGINT) * 8)/1024)* SF.growth)/100) + ((CAST(SF.size AS BIGINT) * 8)/1024)
+	ELSE
+	((CAST(SF.size AS BIGINT) * 8)/1024) + ((CAST(SF.growth AS BIGINT) * 8)/1024)
+	END
+	FROM sysfiles SF
+	ORDER BY SF.fileid' 
+ 
+	EXEC(@sql) 
+
+	SET @sql = 'USE [' + @dbname + '] DBCC SHOWFILESTATS WITH NO_INFOMSGS'
+
+	INSERT INTO #TMP_DataSpace
+	(
+		[Fileid],
+		[FileGroup],
+		[TotalExtents],
+		[UsedExtents],
+		[FileLogicalName],
+		[Filename]
+	)
+	EXEC (@sql)
+
+	UPDATE #TMP_DataSpace
+		SET [DBName] = @dbname
+	WHERE ISNULL([DBName],'') = ''
+ 
+	SELECT @dbname = MIN(dbname) FROM #TMP_DB WHERE dbname > @dbname 
+END 
+
+-- voltar a limpar os parêntesis rectos, novamente...
+UPDATE #TMP_DBFileInfo
+	SET DBName=REPLACE(DBName,'[','')
+
+UPDATE #TMP_DBFileInfo
+	SET DBName=REPLACE(DBName,']','')
+
+SELECT 
+	'Data/Hora' = DFI.dateTimeStamp,
+	'Base de dados' = DFI.DBName,
+	'Nome lógico do ficheiro' = DFI.FileLogicalName,
+	'Nome do ficheiro' = DFI.[Filename],
+	'Tamanho ficheiro (MB)' = DFI.FileCurrentSize,
+	'Incr. Cresc. ficheiro' = DFI.FileGrowth,
+	'Crescimento potencial (MB)' = DFI.FileGrowthSize,
+	'Drive' = SD.DriveName,
+	'Espaço disponível no drive (MB)' = SD.FreeDriveSpace,
+	'Espaço utilizado no ficheiro (MB)' = CAST(ISNULL(((DSP.UsedExtents * 64.00) / 1024), LSP.LogSize *(LSP.LogPercentUsed/100)) AS BIGINT),
+	'Espaço vazio ficheiro (MB)' = DFI.FileCurrentSize - CAST(ISNULL(((DSP.UsedExtents * 64.00) / 1024), LSP.LogSize *(LSP.LogPercentUsed/100)) AS BIGINT),
+	'Espaço vazio ficheiro (%)' = (CAST((DFI.FileCurrentSize - CAST(ISNULL(((DSP.UsedExtents * 64.00) / 1024), LSP.LogSize *(LSP.LogPercentUsed/100)) AS BIGINT)) AS MONEY) / CAST(CASE WHEN ISNULL(DFI.FileCurrentSize,0) = 0 THEN 1 ELSE DFI.FileCurrentSize END AS MONEY)) * 100
+FROM #TMP_DBFileInfo DFI
+LEFT OUTER JOIN #TMP_ServerDrive SD
+ON LEFT(LTRIM(RTRIM(DFI.[FileName])),1) = LTRIM(RTRIM(SD.DriveName))
+LEFT OUTER JOIN #TMP_DataSpace DSP
+ON LTRIM(RTRIM(DSP.[Filename])) = LTRIM(RTRIM(DFI.[Filename]))
+LEFT OUTER JOIN #TMP_LogSpace LSP
+ON LtRIM(RTRIM(LSP.DBName)) = LTRIM(RTRIM(DFI.DBName))
+ORDER BY DriveName, DFI.DBName
+
+

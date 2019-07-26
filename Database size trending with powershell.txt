@@ -1,0 +1,143 @@
+Database size trending with powershell
+
+http://www.sqlservercentral.com/scripts/powershell/90900/
+
+ you need to run the create table for both the ServerList and also the dba_server_database_sizetrend. After you do that you need to insert data for each column example in code above.
+
+example of insert for table
+Alias = Server1.com
+Connection = 10.10.100.1,1433
+ IP = 10.10.100.1
+
+then you cut and paste the powershell script into a powershell file. Make sure you have codeplex SQLServer module installed. After you do this you can run the script and it will cursor trhough the list of servers in ServerList and populate database sizes in MB into the table. 
+
+
+
+-- first create the table
+USE [SQLPowerShell]
+GO
+/****** Object: Table [dbo].[ServerList] Script Date: 05/23/2012 13:16:38 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+SET ANSI_PADDING ON
+GO
+CREATE TABLE [dbo].[ServerList](
+????[Alias] [varchar](255) NULL,
+????[Connection] [varchar](255) NULL,
+????[IP] [varchar](255) NULL
+) ON [PRIMARY]
+
+GO
+SET ANSI_PADDING OFF
+GO
+-- example of insert for table 
+-- Alias = Server1.com
+-- Connection = 10.10.100.1,1433 
+-- IP = 10.10.100.1
+
+-- create a second table to deposit data
+-- powershell will populate this table
+
+USE [SQLPowerShell]
+GO
+/****** Object: Table [dbo].[dba_server_database_sizetrend] Script Date: 05/23/2012 13:25:26 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+SET ANSI_PADDING ON
+GO
+CREATE TABLE [dbo].[dba_server_database_sizetrend](
+????[report_date] [date] NULL,
+???[alias] [nchar](150) NULL,
+????[serverip] [nchar](150) NULL,
+???[dbname] [varchar](150) NULL,
+????[size] [numeric](18, 0) NULL,
+????[dataspaceusage] [numeric](18, 0) NULL,
+????[indexspaceusage] [numeric](18, 0) NULL,
+????[spaceavailable] [numeric](18, 0) NULL
+) ON [PRIMARY]
+GO
+SET ANSI_PADDING OFF
+GO
+
+--cut and past code below into powershell script
+-- dont forget to download codeplex sql server module
+Set-ExecutionPolicy RemoteSigned
+
+import-module SQLServer
+
+
+
+$timecaptured = (Get-Date -format d) 
+
+
+
+#Define Server and Database Repository YOU NEED TO CHANGE $SERVERREPOSITORY Below and $DatabaseRepository
+
+$ServerRepository = 'replacewithyourserver.com,1433'
+
+$DatabaseRepository = "SqlPowerShell"
+
+$qry1 = "SELECT????Alias,Connection,IP from ServersList"
+
+
+
+##Return the servers from the table with server list
+
+get-SqlData -sqlserver $ServerRepository -dbname $DatabaseRepository -qry $qry1 | foreach {
+
+
+
+$alias = $_.Alias
+
+$ServerName = $_.Connection
+
+$ip = $_.IP
+
+???? 
+
+???? 
+
+[System.Reflection.Assembly]::LoadWithPartialName("Microsoft.SqlServer.SMO") | out-null
+
+$SMOserver = New-Object ('Microsoft.SqlServer.Management.Smo.Server') -argumentlist $ip
+
+$SMOserver.Databases | select Name, Size, DataSpaceUsage, IndexSpaceUsage, SpaceAvailable | foreach {
+
+????????
+
+????????$dbname = $_.name
+
+ $size = [Math]::Round($_.size)
+
+???? $dataspaceusage = [Math]::Round($_.dataspaceusage/1024)
+
+????????$indexpaceusage = [Math]::Round($_.indexspaceusage/1024)
+
+???? $spaceavailable = [Math]::Round($_.spaceavailable/1024)
+
+???? "$alias , $dbname , $size , $dataspaceusage , $indexpaceusage , $spaceavailable , $timecaptured" | Write-Host
+
+
+
+
+
+Set-SqlData -sqlserver $ServerRepository -dbname $DatabaseRepository -qry "insert into dba_server_database_sizetrend (report_date,alias,serverip,dbname,size,dataspaceusage,indexspaceusage,spaceavailable)values('$($timecaptured)','$($alias)','$($servername)','$($dbname)','$($size)','$($dataspaceusage)','$($indexpaceusage)','$($spaceavailable)')"
+
+ }
+
+ }
+
+ 
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,456 @@
+SQL Server DB Size Report
+
+http://www.sqlservercentral.com/scripts/Maintenance+and+Management/31003/
+
+
+This script is similar in style to my previous script SQL Server Job Status Report, but this script generates an HTML report on the size of all databases on a specific SQL Server instance. The report consists of several sections: a summary report on the size of all databases; a summary report on the size of all data files; a report on the size of all disks; details reports on each database.
+
+The script is designed to be included in a DTS package ActiveX Task component and makes use of a number of DTS Package Global Variables - these variables are listed in detail in the script header.
+
+The server from which the script is executed requires ADO to be installed, and also Outlook if the email option is to be used - I personally run this script from a SQL Server instance on my desktop PC. The script also makes use of the File System Object to gather data about the server disks, if the user executing the script does not have permissions on any of the server disks, follow the instructions in the script header on how to disable this feature.
+
+This script has been tested against SQL Server 2000 running on NT and Win2K. 
+
+
+
+
+'**********************************************************************************************************
+'  Name: 		SQL Server DB Size Report
+'  Script Language: 	VBScript
+'  Author: 		Dave Leathem
+'  Date: 			28th Nov 2003
+'
+'  Description:
+'  This script will generate an HTML report on the size of all databases on a specified SQL
+'  Server instance. This report can be emailed to specified addresses if required, or the
+'  generated HTML file may be published to a web site or distributed with any other file
+'  distribution mechanisms.
+'  The report is divided into four sections: DB Summary Report, which contains a table of
+'  current database sizes; Data File Summary Report, which contains a table of data file
+'  information, including size, growth and free space left on the relevant drive; Disk Space
+'  Summary Report, which contains a table of all available drives, free space, size and
+'  which data files reside on that drive; and finally, DB Detail Reports, which contains
+'  detailed reports on each database on the instance.
+'  In the DB Summary Report, databases are highlighted when their size exceeds the limit
+'  specified in the FILE_SIZE_LIMIT global variable. In the DB Detail Reports, the
+'  database size and/or the file sizes are highlighted when they exceed this limit.
+'  In the Data File Summary Report, files are highlighted when their growth value exceeds
+'  the amount of remaining free space on the relevant drive.
+'
+'  Package Global Variables:
+'  This script requires a number of Global Variables to be created in any package that it is
+'  included as part of.
+'  Varible Name		Req'd/Opt	Description
+'  ------------------------------------	-------------------------	---------------------------------------------------------------------------
+'  TARGET_SERVER	Required	Specifies the SQL Server instance for which the
+'					size report will be compiled.
+'  ADDRESSES		Optional		Contains a list of email addresses to which the
+'					report will be sent. Addresses must be separated
+'					by semi-colons, and the list must be terminated
+'					with a semi-colon.
+'  WIN_SECURITY	Required	Specifies whether to use Windows Integrated
+'					Security when connecting to the specified SQL
+'					Server instance. Valid values are "YES" and
+'					"NO".
+'  UID			Optional		Only required if Windows Integrated Security is
+'					not being used. Specifies a valid SQL Server
+'					user ID.
+'  PWD			Optional		Only required if Windows Integrated Security is
+'					not being used. Specifies the password for the
+'					SQL Server user ID.
+'  FILE_SIZE_LIMIT	Required	Specifies a warning size limit for the database
+'					and data files.
+'  EMAIL_REPORT	Required	Specifies if the job report is to be emailed. Valid
+'					values are "YES" and "NO".
+'  REPORT_PATH	Required	Specifies the file path where the job report will
+'					be written to.
+'  KEEP_REPORT_FILE	Required	Specifies if the Report file is to be retained when
+'					the report is generated. Valid values are "YES"
+'					and "NO".
+'  DISABLE_DISK_SIZE	Required	Specifies if the job should calculate the size of
+'					the server drives. This should be set to "NO" if
+'					the user id running the job does not have the
+'					Windows permissions to access all the drives.
+'					Valid values are "YES" and "NO".
+'
+'---------------------------------------------------------------------------------------------------------------------------------------------
+'  Revision History
+'---------------------------------------------------------------------------------------------------------------------------------------------
+'  Date		Version		Comment
+'  ---------------------	------------------------	----------------------------------------------------------------------------------------
+'  04 Dec 2003	1.0		Initial version
+'  20 Jan 2004	2.0		HTML report now displays files sizes graphically.
+'
+'**********************************************************************************************************
+
+'**********************************************************************************************************
+' Function:	Main
+' Description:	Main processing function for ActiveX script. This function should be 
+'		defined as the "Entry function" for the ActiveX Script Task.
+'**********************************************************************************************************
+
+Function Main()
+
+	Dim MailSubject, MailText, HTMLText, FileRepText, DiskRepText, DBDetailRep
+	Dim ErrMsg, ErrLineNo, LineCount, ErrLine
+	Dim DBId, FileSize, DBName, LocalPath, intDBSize, intFileSize, intGrowth
+	Dim DBFileList(10,2), intArr, flgNew, DiskDetail(100), DiskLetter(100), intDisk, FileDetail, DiskSpace(100), DiskSize(100)
+	Dim PercOne(100), PercSpace, PercUsed, PercExt
+	
+	' Declare ADO object variables
+	Dim adoConn, rsDBSize, rsDiskSpace, rsDBDetail, rsDiskSize, sqlDiskSize, rsDBFiles
+
+	' Declare FSO variables
+	DIM oFSO, OutFile, ReadFile
+
+	' Declare Outlook object variables
+	Dim olApp, olMail, olNamespace
+
+	' Create ADO objects
+	set adoConn = CreateObject("ADODB.Connection")
+	set rsDBSize = CreateObject("ADODB.RecordSet")
+	set rsDBFiles = CreateObject("ADODB.RecordSet")
+	set rsDBDetail = CreateObject("ADODB.RecordSet")
+	set rsDiskSpace = CreateObject("ADODB.RecordSet")
+	set rsDiskSize = CreateObject("ADODB.RecordSet")
+	sqlDiskSize = "DECLARE @oFSO INT, @oDrive INT, @drsize VARCHAR(255), @ret INT, @dletter VARCHAR(2) " & vbCrLf & _
+		"SET @dletter = '<drive>'" & vbCrLf & _
+		"EXEC @ret = master.dbo.sp_OACreate 'scripting.FileSystemObject', @oFSO OUT" & vbCrLf & _
+		"EXEC @ret = master.dbo.sp_OAMethod @oFSO, 'GetDrive', @oDrive OUT, @dletter" & vbCrLf & _
+		"EXEC @ret = master.dbo.sp_OAMethod @oDrive, 'TotalSize', @drsize OUT" & vbCrLf & _
+		"EXEC master.dbo.sp_OADestroy @oDrive" & vbCrLf & _
+		"EXEC master.dbo.sp_OADestroy @oFSO" & vbCrLf & _
+		"SELECT @dletter, @drsize"
+
+	' Open ADO connection using windows security
+	IF DTSGlobalVariables("WIN_SECURITY").Value = "YES" THEN
+		adoConn.Open = "Provider=SQLOLEDB;Integrated Security=SSPI;Server=" & DTSGlobalVariables("TARGET_SERVER").Value & ";Database=MSDB;Application Name=DB Size Report"
+	ELSE
+		adoConn.Open = "Provider=SQLOLEDB;UID=" & DTSGlobalVariables("UID").Value & ";PWD=" & DTSGlobalVariables("PWD").Value & ";Server=" & DTSGlobalVariables("TARGET_SERVER").Value & ";Database=MSDB;Application Name=DB Size Report"
+	END IF
+
+	' Create FSO objects
+	Set oFSO = CreateObject("Scripting.FileSystemObject")
+	Set OutFile = oFSO.CreateTextFile(DTSGlobalVariables("REPORT_PATH").Value,true)
+	OutFile.WriteLine("<HTML>")
+	OutFile.WriteLine("<HEAD>")
+	OutFile.WriteLine("<TITLE>DB Size Report for " & DTSGlobalVariables("TARGET_SERVER").Value & " on " & Date & " " & Time & "</TITLE>")
+	OutFile.WriteLine("</HEAD>")
+	OutFile.WriteLine("<BODY>")
+	OutFile.WriteLine("<FONT SIZE=5 COLOR=""DARKRED""><B><U>DB Size Report for " & DTSGlobalVariables("TARGET_SERVER").Value & " on " & Date & " " & Time & "</U></B></FONT>")
+	OutFile.WriteLine("<BR><BR><HR>")
+
+	'Create Outlook objects
+	If DTSGlobalVariables("EMAIL_REPORT").Value = "YES" Then
+		Set olApp = CreateObject("Outlook.Application")
+		Set olNameSpace = olApp.GetNameSpace("MAPI")
+		olNameSpace.Logon
+		Set olMail = olApp.CreateItem(0)
+	End If
+
+	' Open recordsets
+	rsDBSize.Open "exec master.dbo.sp_databases", adoConn
+	rsDiskSpace.Open "exec master.dbo.xp_fixeddrives", adoConn
+
+	' Write Report Index
+	OutFile.WriteLine("<A NAME=""ReportIndex"">")
+	OutFile.WriteLine("<FONT SIZE=4 COLOR=""DARKRED""><B><U>Report Index</U></B></FONT><BR><BR>")
+	OutFile.WriteLine("<A HREF=""#disksumm"">Disk Space Summary Report<A><BR>")
+	OutFile.WriteLine("<A HREF=""#diskfile"">Disk Space and Datafiles Reports<A><BR>")
+	OutFile.WriteLine("<BR><HR>")
+
+	' Write Disk Space Summary Report
+	OutFile.WriteLine("<A NAME=""disksumm"">")
+	OutFile.WriteLine("<FONT SIZE=4 COLOR=""DARKRED""><B><U>Disk Space Summary Report</U></B></FONT><BR><BR>")
+	OutFile.WriteLine("<TABLE BORDER=1 WIDTH=100%>")
+	OutFile.WriteLine("<TR BGCOLOR=""NAVY""><TD><FONT COLOR=""WHITE""><B>Drive</TD>")
+	OutFile.WriteLine("<TD WIDTH=100><FONT COLOR=""WHITE""><B>Total Size</TD>")
+	OutFile.WriteLine("<TD WIDTH=100><FONT COLOR=""WHITE""><B>Free Space</TD>")
+	OutFile.WriteLine("<TD WIDTH=50%><FONT COLOR=""WHITE""><B>% Disk Space Used</TD></TR>")
+	rsDiskSpace.MoveFirst
+	intDisk = 1
+	While Not rsDiskSpace.EOF
+		OutFile.WriteLine("<TR><TD><A HREF=""#" & rsDiskSpace.Fields.Item(0) & "Drive"">" & rsDiskSpace.Fields.Item(0) & "</A></TD>")
+		' Write Disk Detail Heading
+		DiskLetter(intDisk) = rsDiskSpace.Fields.Item(0)
+		DiskDetail(intDisk) = "<A NAME=""#" & rsDiskSpace.Fields.Item(0) & "Drive"">" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TABLE BORDER=1 WIDTH=""100%"">" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TR><TD WIDTH=100 BGCOLOR=""navy""><FONT COLOR=""white""><B>Drive</B></FONT></TD>"
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD>" & rsDiskSpace.Fields.Item(0) & "</TD></TR>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "</TABLE>" & vbCrLf
+		' Write Disk Detail Summary
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TABLE BORDER=1 WIDTH=""100%""><TR>" & vbCrLf
+		If DTSGlobalVariables("DISABLE_DISK_SIZE").Value = "NO" Then
+			rsDiskSize.Open Replace(sqlDiskSize,"<drive>",rsDiskSpace.Fields.Item(0) & ":"), adoConn
+			OutFile.WriteLine("<TD ALIGN=""RIGHT"">" & CStr(Round((rsDiskSize.Fields.Item(1) / 1024) / 1024, 0)) & " MB</TD>")
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=100 BGCOLOR=""navy""><FONT COLOR=""white""><B>Total Size</TD>" & vbCrLf
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""14%"">" & CStr(Round((rsDiskSize.Fields.Item(1) / 1024) / 1024, 0)) & " MB</TD>" & vbCrLf
+			PercOne(intDisk) = Round((rsDiskSize.Fields.Item(1) / 1024) / 1024, 2) / 100
+			DiskSpace(intDisk) = Round((rsDiskSize.Fields.Item(1) / 1024) / 1024, 0) - rsDiskSpace.Fields.Item(1)
+			rsDiskSize.Close
+		Else
+			OutFile.WriteLine("<TD><I>[Function Disabled]</TD>")
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=100 BGCOLOR=""navy""><FONT COLOR=""white""><B>Total Size</TD>" & vbCrLf
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""14%""><I>[Function disabled]</TD>" & vbCrLf
+		End If
+		OutFile.WriteLine("<TD ALIGN=""RIGHT"">" & rsDiskSpace.Fields.Item(1) & " MB</TD>")
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=100 BGCOLOR=""navy""><FONT COLOR=""white""><B>Free Space</TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""14%"">" & rsDiskSpace.Fields.Item(1) & " MB</TD>" & vbCrLf
+		If DTSGlobalVariables("DISABLE_DISK_SIZE").Value = "NO" Then
+			PercSpace =Round(rsDiskSpace.Fields.Item(1) / PercOne(intDisk), 0)
+			PercUsed = 100 - PercSpace
+			OutFile.WriteLine("<TD>")
+			OutFile.WriteLine("<TABLE WIDTH=""100%"" BORDER=0 CELLSPACING=0>")
+			OutFile.WriteLine("<TR><TD WIDTH=""" & PercUsed & "%"" BGCOLOR=""red""><FONT COLOR=""red"">X</FONT></TD>")
+			OutFile.WriteLine("<TD WIDTH=""" & PercSpace & "%"" BGCOLOR=""green""></TD></TR>")
+			OutFile.WriteLine("</TABLE>")
+			OutFile.WriteLine("</TD>")
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=100 BGCOLOR=""navy""><FONT COLOR=""white""><B>% Used</TD>" & vbCrLf
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""14%"">" & CStr(PercUsed) & "%</TD>" & vbCrLf
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=100 BGCOLOR=""navy""><FONT COLOR=""white""><B>% Free</TD>" & vbCrLf
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""14%"">" & CStr(PercSpace) & " %</TD>" & vbCrLf
+		Else
+			OutFile.WriteLine("<TD><I>Function Disabled</TD>")
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=100 BGCOLOR=""navy""><FONT COLOR=""white""><B>% Used</TD>" & vbCrLf
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""14%""><I>[Function disabled]</TD>" & vbCrLf
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=100 BGCOLOR=""navy""><FONT COLOR=""white""><B>% Free</TD>" & vbCrLf
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""14%""><I>[Function disabled]</TD>" & vbCrLf
+		End If
+		OutFile.WriteLine("</TR>")
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "</TR></TABLE>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TABLE WIDTH=""100%"" BORDER=1 CELLSPACING=1>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TR BGCOLOR=""navy"">" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD><FONT COLOR=""white""><B>Database File</TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=100><FONT COLOR=""white""><B>Database</TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=55><FONT COLOR=""white""><B>Size</TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=55><FONT COLOR=""white""><B>Ext.</TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""50%""><FONT COLOR=""white""><B>% Disk Space Used</TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "</TR><TR>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD><I>[Free Space]</I> </TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD></TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD ALIGN=""RIGHT""><FONT SIZE=2>" & rsDiskSpace.Fields.Item(1) & " MB</TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD></TD>" & vbCrLf
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD>" & vbCrLf
+		If DTSGlobalVariables("DISABLE_DISK_SIZE").Value = "NO" Then
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<TABLE WIDTH=""100%"" BORDER=0 CELLSPACING=0>" & vbCrLf
+			If PercSpace > 50 Then
+				DiskDetail(intDisk) = DiskDetail(intDisk) & "<TR><TD WIDTH=""" & CStr(PercSpace) & "%"" BGCOLOR=""green"" TITLE=""" & CStr(PercSpace) & "%""><FONT COLOR=""green"">X</TD>" & vbCrLf
+				DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""" & CStr(100 - PercSpace) & "%"" BGCOLOR=""white""></TD>" & vbCrLf
+			Else
+				DiskDetail(intDisk) = DiskDetail(intDisk) & "<TR><TD WIDTH=""" & CStr(PercSpace) & "%"" BGCOLOR=""green"" TITLE=""" & CStr(PercSpace) & "%""></TD>" & vbCrLf
+				DiskDetail(intDisk) = DiskDetail(intDisk) & "<TD WIDTH=""" & CStr(100 - PercSpace) & "%"" BGCOLOR=""white""><FONT COLOR=""white"">X</TD>" & vbCrLf
+			End If
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "</TR></TABLE>" & vbCrLf
+		Else
+			DiskDetail(intDisk) = DiskDetail(intDisk) & "<I>[Function disabled]" & vbCrLf
+		End If
+		DiskDetail(intDisk) = DiskDetail(intDisk) & "</TD></TR>" & vbCrLf
+		intDisk = intDisk + 1
+		rsDiskSpace.MoveNext
+	Wend
+	OutFile.WriteLine("</TABLE>")
+	OutFile.WriteLine("<A HREF=""#ReportIndex""><FONT SIZE=1>Back To Report Index</FONT></A>")
+	OutFile.WriteLine("<BR><BR><HR>")
+	DiskDetail(intDisk) = "XXXXX"
+
+	' Disk Space and Datafile Reports
+	OutFile.WriteLine("<A NAME=""diskfile"">")
+	OutFile.WriteLine("<FONT SIZE=4 COLOR=""DARKRED""><B><U>Disk Space Summary Report</U></B></FONT><BR><BR>")
+	intDisk = 1
+	While DiskDetail(intDisk) <> "XXXXX"
+		OutFile.Write DiskDetail(intDisk)
+		FileDetail = ""
+		rsDBSize.MoveFirst
+		While Not rsDBSize.EOF
+			rsDBDetail.Open "EXEC master.dbo.sp_helpdb @dbname='" & rsDBSize.Fields.Item(0) & "'", adoConn
+			DBName = rsDBDetail.Fields.Item(0)
+			Set rsDBFiles = rsDBDetail.NextRecordset
+			While Not rsDBFiles.EOF
+				If UCase(Left(rsDBFiles.Fields.Item(2),1)) = UCase(DiskLetter(intDisk)) Then
+					intFileSize = CDbl(Replace(rsDBFiles.Fields.Item(4)," KB","")) / 1024
+					If Right(rsDBFiles.Fields.Item(6),1) = "%" Then
+						intGrowth = (CDbl(Replace(rsDBFiles.Fields.Item(4)," KB","")) / 100) * CDbl(Replace(rsDBFiles.Fields.Item(6),"%",""))
+					Else
+						intGrowth = CDbl(Replace(rsDBFiles.Fields.Item(6)," KB",""))
+					End If
+					intGrowth =  intGrowth / 1024
+					FileDetail = FileDetail & "<TR>" & vbCrLf
+					FileDetail = FileDetail & "<TD><A NAME=""#" & RTrim(rsDBFiles.Fields.Item(0)) & """>" & rsDBFiles.Fields.Item(0) & "</TD>" & vbCrLf
+					FileDetail = FileDetail & "<TD><A HREF=""#" & DBName & """>" & DBName & "</A></TD>" & vbCrLf
+					FileDetail = FileDetail & "<TD ALIGN=""RIGHT""><FONT SIZE=2>" & CStr(Round(intFileSize,0)) & " MB</TD>" & vbCrLf
+					FileDetail = FileDetail & "<TD ALIGN=""RIGHT""><FONT SIZE=2>" & CStr(Round(intGrowth,2)) & " MB</TD>" & vbCrLf
+					DiskSpace(intDisk) = DiskSpace(intDisk) - Round(intFileSize,0)
+					FileDetail = FileDetail & "<TD>" & vbCrLf
+					If DTSGlobalVariables("DISABLE_DISK_SIZE").Value = "NO" Then
+						PercUsed =Round(intFileSize / PercOne(intDisk), 0)
+						PercExt = Round(intGrowth / PercOne(intDisk),0)
+						If (PercUsed + PercExt) > 100 Then PercExt = 100 - PercUsed
+						PercSpace = 100 - (PercUsed + PercExt)
+						FileDetail = FileDetail & "<TABLE WIDTH=""100%"" BORDER=0 CELLSPACING=0>" & vbCrLf
+						If PercSpace < 50 Then
+							FileDetail = FileDetail & "<TR><TD WIDTH=""" & CStr(PercUsed) & "%"" BGCOLOR=""red"" TITLE=""" & CStr(PercUsed) & "%""><FONT COLOR=""red"">X</TD>" & vbCrLf
+							FileDetail = FileDetail & "<TD WIDTH=""" & CStr(PercExt) & "%"" BGCOLOR=""blue"" TITLE=""" & CStr(PercExt) & "%""></TD>" & vbCrLf
+							FileDetail = FileDetail & "<TD WIDTH=""" & CStr(PercSpace) & "%"" BGCOLOR=""white""></TD>" & vbCrLf
+						Else
+							FileDetail = FileDetail & "<TR><TD WIDTH=""" & CStr(PercUsed) & "%"" BGCOLOR=""red"" TITLE=""" & CStr(PercUsed) & "%""></TD>" & vbCrLf
+							FileDetail = FileDetail & "<TD WIDTH=""" & CStr(PercExt) & "%"" BGCOLOR=""blue"" TITLE=""" & CStr(PercExt) & "%""></TD>" & vbCrLf
+							FileDetail = FileDetail & "<TD WIDTH=""" & CStr(PercSpace) & "%"" BGCOLOR=""white""><FONT COLOR=""white"">X</TD>" & vbCrLf
+						End If
+						FileDetail = FileDetail & "</TR></TABLE>" & vbCrLf
+					Else
+						FileDetail = FileDetail & "<I>[Function disabled]" & vbCrLf
+					End If
+					FileDetail = FileDetail & "</TD></TR>" & vbCrLf
+				End If
+				rsDBFiles.MoveNext
+			Wend 
+			If rsDBFiles.State = 1 Then rsDBFiles.Close
+			If rsDBDetail.State = 1 Then rsDBDetail.Close
+			rsDBSize.MoveNext
+		Wend
+		OutFile.WriteLine("<TR>")
+		OutFile.WriteLine("<TD><I>[Non-DB File Size]</TD>")
+		OutFile.WriteLine("<TD></TD>")
+		OutFile.WriteLine("<TD ALIGN=""RIGHT""><FONT SIZE=2>" & CStr(DiskSpace(intDisk)) & " MB</TD>")
+		OutFile.WriteLine("<TD></TD>")
+		OutFile.WriteLine("<TD>")
+		If DTSGlobalVariables("DISABLE_DISK_SIZE").Value = "NO" Then
+			PercUsed =Round(DiskSpace(intDisk) / PercOne(intDisk), 0)
+			PercSpace = 100 - PercUsed
+			OutFile.WriteLine("<TABLE WIDTH=""100%"" BORDER=0 CELLSPACING=0>")
+			If PercSpace < 20 Then
+				OutFile.WriteLine("<TR><TD WIDTH=""" & CStr(PercUsed) & "%"" BGCOLOR=""red"" TITLE=""" & CStr(PercUsed) & "%""><FONT COLOR=""red"">X</TD>")
+				OutFile.WriteLine("<TD WIDTH=""" & CStr(PercSpace) & "%"" BGCOLOR=""white""></TD>")
+			Else
+				OutFile.WriteLine("<TR><TD WIDTH=""" & CStr(PercUsed) & "%"" BGCOLOR=""red"" TITLE=""" & CStr(PercUsed) & "%""></TD>")
+				OutFile.WriteLine("<TD WIDTH=""" & CStr(PercSpace) & "%"" BGCOLOR=""white""><FONT COLOR=""white"">X</TD>")
+			End If
+			OutFile.WriteLine("</TR></TABLE>")
+		Else
+			OutFile.WriteLine("<I>[Function disabled]")
+		End If
+		OutFile.WriteLine("</TD></TR>")
+		OutFile.Write FileDetail
+		OutFile.WriteLine("</TABLE>")
+		OutFile.WriteLine("<A HREF=""#ReportIndex""><FONT SIZE=1>Back To Report Index</FONT></A>")
+		OutFile.WriteLine("<BR><BR>")
+		intDisk = intDisk + 1
+	Wend
+	OutFile.WriteLine("<HR>")
+
+	' Write DB Detail Reports
+	DBDetailRep = ""
+	FielRepText = ""
+	For intArr = 1 To 10
+		DBFileList(intArr,1) = ""
+		DBFileList(intArr,2) = ""
+	Next
+	rsDBSize.MoveFirst
+	While Not rsDBSize.EOF
+		rsDBDetail.Open "EXEC master.dbo.sp_helpdb @dbname='" & rsDBSize.Fields.Item(0) & "'", adoConn
+		intDBSize = CDbl(Replace(rsDBDetail.Fields.Item(1)," MB", ""))
+		' Write DB Detail Section
+		DBDetailRep = DBDetailRep & "" & vbCrLf
+		DBDetailRep = DBDetailRep & "<TABLE BORDER=1 WIDTH=100%>" & vbCrLf
+		DBDetailRep = DBDetailRep & "<TR><TD WIDTH=150 BGCOLOR=""NAVY""><FONT COLOR=""WHITE""><B>Database Name</TD><TD><B><A NAME=""#" & rsDBSize.Fields.Item(0) & """>" & rsDBSize.Fields.Item(0) & "</TD></TR>" & vbCrLf
+		DBDetailRep = DBDetailRep & "</TABLE>" & vbCrLf
+		DBDetailRep = DBDetailRep & "<TABLE BORDER=1 WIDTH=100%>" & vbCrLf
+		DBDetailRep = DBDetailRep & "<TR><TD WIDTH=120 BGCOLOR=""NAVY""><FONT COLOR=""WHITE""><B>DB Size</TD>"
+		If intDBSize > CDbl(DTSGlobalVariables("FILE_SIZE_LIMIT").Value) Then
+			DBDetailRep = DBDetailRep & "<TD WIDTH=22% BGCOLOR=""RED"">" & rsDBDetail.Fields.Item(1) & "</TD>"
+		Else
+			DBDetailRep = DBDetailRep & "<TD WIDTH=22%>" & rsDBDetail.Fields.Item(1) & "</TD>"
+		End If
+		DBDetailRep = DBDetailRep & "<TD WIDTH=120 BGCOLOR=""NAVY""><FONT COLOR=""WHITE""><B>Owner</TD>"
+		DBDetailRep = DBDetailRep & "<TD WIDTH=22%>" & rsDBDetail.Fields.Item(2) & "</TD>"
+		DBDetailRep = DBDetailRep & "<TD WIDTH=120 BGCOLOR=""NAVY""><FONT COLOR=""WHITE""><B>Created</TD>"
+		DBDetailRep = DBDetailRep & "<TD WIDTH=22%>" & rsDBDetail.Fields.Item(4) & "</TD></TR>" & vbCrLf
+		DBDetailRep = DBDetailRep & "</TABLE>" & vbCrLf
+		DBDetailRep = DBDetailRep & "<TABLE BORDER=1 WIDTH=100%>" & vbCrLf
+		DBDetailRep = DBDetailRep & "<TR><TD WIDTH=120 BGCOLOR=""NAVY""><FONT COLOR=""WHITE""><B>Status</TD>"
+		DBDetailRep = DBDetailRep & "<TD>" & Replace(rsDBDetail.Fields.Item(5),",","<BR>") & "</TD></TR>" & vbCrLf
+		DBDetailRep = DBDetailRep & "</TABLE>" & vbCrLf
+		Set rsDBDetail = rsDBDetail.NextRecordset
+		DBDetailRep = DBDetailRep & "<TABLE BORDER=1 WIDTH=100%>" & vbCrLf
+		DBDetailRep = DBDetailRep & "<TR BGCOLOR=""NAVY""><TD><FONT COLOR=""WHITE""><B>File Name</TD>" 		
+		DBDetailRep = DBDetailRep & "<TD><FONT COLOR=""WHITE""><B>File Size</TD>" 		
+		DBDetailRep = DBDetailRep & "<TD><FONT COLOR=""WHITE""><B>File Path</TD>" 		
+		DBDetailRep = DBDetailRep & "<TD><FONT COLOR=""WHITE""><B>File Group</TD>" 
+		DBDetailRep = DBDetailRep & "<TD><FONT COLOR=""WHITE""><B>Max Size</TD>" 
+		DBDetailRep = DBDetailRep & "<TD><FONT COLOR=""WHITE""><B>Growth</TD>" 
+		DBDetailRep = DBDetailRep & "<TD><FONT COLOR=""WHITE""><B>Usage</TD></TR>" & vbCrLf
+		While Not rsDBDetail.EOF
+			intFileSize = CDbl(Replace(rsDBDetail.Fields.Item(4)," KB","")) / 1024
+			DBDetailRep = DBDetailRep & "<TR><TD><A HREF=""#" & RTrim(rsDBDetail.Fields.Item(0)) & """>" & rsDBDetail.Fields.Item(0) & "</A></TD>"
+			If intFileSize > CDbl(DTSGlobalVariables("FILE_SIZE_LIMIT").Value) Then
+				DBDetailRep = DBDetailRep & "<TD ALIGN=""RIGHT"" BGCOLOR=""RED"">" & rsDBDetail.Fields.Item(4) & "</TD>"
+			Else
+				DBDetailRep = DBDetailRep & "<TD ALIGN=""RIGHT"">" & rsDBDetail.Fields.Item(4) & "</TD>"
+			End If
+			DBDetailRep = DBDetailRep & "<TD>" & rsDBDetail.Fields.Item(2) & "</TD>"
+			DBDetailRep = DBDetailRep & "<TD>" & rsDBDetail.Fields.Item(3) & "</TD>"
+			DBDetailRep = DBDetailRep & "<TD>" & rsDBDetail.Fields.Item(5) & "</TD>"
+			DBDetailRep = DBDetailRep & "<TD>" & rsDBDetail.Fields.Item(6) & "</TD>"
+			DBDetailRep = DBDetailRep & "<TD>" & rsDBDetail.Fields.Item(7) & "</TD></TR>" & vbCrLf
+			' Write File Detail Section
+			rsDiskSpace.MoveFirst
+			While (rsDiskSpace.Fields.Item(0) <> UCase(Left(rsDBDetail.Fields.Item(2),1))) and (Not rsDiskSpace.EOF)
+				rsDiskSpace.MoveNext
+			Wend
+			rsDBDetail.MoveNext
+		Wend 
+		DBDetailRep = DBDetailRep & "</TABLE>" & vbCrLf
+		DBDetailRep = DBDetailRep & "<A HREF=""#ReportIndex""><FONT SIZE=1>Back To Report Index</FONT></A>" & vbCrLf
+		DBDetailRep = DBDetailRep & "<BR><BR><HR>" & vbCrLf
+		rsDBDetail.Close
+		rsDBSize.MoveNext
+	Wend
+	OutFile.WriteLine("<FONT SIZE=4 COLOR=""DARKRED""><B><U>DB Detail Reports</U></B></FONT><BR><BR>")
+	OutFile.Write(DBDetailRep)
+
+	rsDBSize.Close
+	rsDiskSpace.Close
+
+	MailSubject = "DB Size Report for " & DTSGlobalVariables("TARGET_SERVER").Value
+
+	' Close report file
+	OutFile.WriteLine("</BODY>")
+	OutFile.WriteLine("</HTML>")
+	OutFile.Close
+
+	Set ReadFile = oFSO.OpenTextFile(DTSGlobalVariables("REPORT_PATH").Value, 1)
+
+	'Determine if report is to be emailed
+	If DTSGlobalVariables("EMAIL_REPORT").Value = "YES" Then
+		' Set email properties
+		AddrList = DTSGlobalVariables("ADDRESSES").Value
+		Addr = ""
+		For iChar = 1 To Len(AddrList) - 1
+			If Mid(AddrList, iChar, 1) = ";" Then
+				olMail.Recipients.Add Addr
+				Addr = ""
+			Else
+				Addr = Addr & Mid(AddrList, iChar, 1)
+			End If
+		Next
+		olMail.Recipients.Add Addr
+		olMail.Recipients.ResolveAll
+		olMail.Subject = MailSubject
+		olMail.HTMLBody = ReadFile.ReadAll
+		olMail.Send
+	End If
+
+	' Clean Up
+	ReadFile.Close
+	If DTSGlobalVariables("KEEP_REPORT_FILE").Value = "NO" Then
+		oFSO.DeleteFile DTSGlobalVariables("REPORT_PATH").Value, True
+	End If
+	Set oFSO = Nothing
+	Set olMail = Nothing
+	Set olApp = Nothing
+
+	Main = DTSTaskExecResult_Success
+
+	adoConn.Close
+
+End Function

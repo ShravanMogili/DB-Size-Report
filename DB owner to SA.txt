@@ -1,0 +1,5 @@
+database owner to SA 
+
+Copy and paste the code in the SQL Management Studio. It will generate the final script for you in the output screen. Copy them and run in the SQL Management Studio again and alter database owner details to SA.
+
+SELECT 'use '+QUOTENAME(name)+ ' exec sp_changedbowner @loginame =''sa'' ' FROM sys.databases AS d WHERE d.database_id>4

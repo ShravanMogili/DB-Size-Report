@@ -1,0 +1,275 @@
+Ensures that plenty of space is available for mainteGrows all of the data files in a database based on the greater of a fixed minimum free space amount or a dynamic percentage of the size of the largest table in the filegroup.
+nance operations and minimizes auto-growth of data files during business hours, especially if instant file initialization (applicable to SQL 2005+) is not on.
+Can optionally override max autogrow settings and also optionally temporarily set a read-only filegroup to readwrite for growth, and then revert back to readonly.
+Run this in an overnight job, even if instant file initialization is on for SQL2005+, before any maintenance jobs, especially index defragmentation.
+This will work with SQL Server 2005 and 2008.
+Known weakness: If you have multiple files in a filegroup, it will expect the greater of MinFreeSpace or the entire percentage of the Largest Table available in each of the files of the filegroup.
+This is designed to run from a central administtrative database.
+
+Required Input Parameters:
+none
+
+Optional Input Parameters:
+@DatabaseID int=0, ID of the database to grow the files in. If omitted, the ID will be looked up from the name. If both ID and name are provided, the ID takes precedence.
+@DatabaseName sysname='', Name of the database to grow the files in. If omitted, the name will be looked up from the ID. If both ID and name are omitted, the ID/Name of the current database is used.
+@LargestTablePercent int=150, The desired amount of free space as a percentage of the largest table in the file - if the largest table is 256MB and @LargestTablePercent is 200, then it will seek to have 512MB free in the file.
+@MinFreeSpace int=64, The fixed minimum free space in megabytes desired in the file, regardless of the size of the largest table.
+Set to 0 if you want the largest table size to be the sole controlling factor in file growth.
+@Granularity int=16, If the desired size this proc wants to grow to is 920MB and @Granularity=256 (megabytes), then it will round up to the nearest full multple of 256MB -- 1024 MB.
+@OverrideMaxSize bit=0, If 1, and the desired size exceeds the maximum autogrow size, it will raise the maximum autogrow size to the size that it wants the file to grow to. Otherwise it won't touch the file.
+@OverrideReadOnly bit=0, Allows growing or shrinking of files inside of READ_ONLY filegroups.
+@AllowShrink bit=0, If the file is over-size, allow a DBCC ShrinkFile to be issued. Recommend to be false as it will fragment the indexes and tables in the database files.
+Re-growth will also more likely to result in more file fragments at the filesystem level. But sometimes files can be grossly oversized with 90+% free space.
+@ShrinkTruncateOnly bit=1 If @AllowShrink=1 and it wants to shrink a file, this will cause it not to move data pages.
+Will not fragment tables and indexes, but it will very likely not shrink down to the desired size (LargestTable*@LargestTablePercent/100; round up to nearest whole mulitiple of @Granularity)
+
+Usage:
+EXECUTE Admin.Util_BatchAutoGrow @DatabaseName='CalvaryHelps', @LargestTablePercent=200, @MinFreeSpace=256, @Granularity=64, @AllowShrink=0, @ShrinkTruncateOnly=0
+
+DECLARE @SQL nVarChar(4000)
+SET @SQL=''
+SELECT @SQL=@SQL+'EXECUTE Admin.Util_BatchAutoGrow @DatabaseName=''' + name + ''', @LargestTablePercent=200, @MinFreeSpace=4, @Granularity=4, @AllowShrink=0, @ShrinkTruncateOnly=0' + CHAR(13)+CHAR(10)
+FROM sys.databases
+WHERE database_id>4
+EXECUTE (@SQL)
+
+ 
+
+Copyright:
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Lesser General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Lesser General Public License for more details.
+
+see <http://www.fsf.org/licensing/licenses/lgpl.html> for the license text.
+
+*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=
+
+
+
+
+
+
+SET ANSI_NULLS ON
+SET QUOTED_IDENTIFIER ON
+SET ANSI_PADDING ON
+GO
+
+--Create Admin schema if it doesn't exist
+IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name='Admin') EXECUTE ('CREATE SCHEMA Admin')
+
+IF OBJECT_ID('Admin.Util_BatchAutoGrow', 'P') IS NOT NULL DROP PROCEDURE Admin.Util_BatchAutoGrow
+GO
+
+/*
+*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=
+Util_BatchAutoGrow
+By Jesse Roberge - YeshuaAgapao@Yahoo.com
+
+Grows all of the data files in a database based on the greater of a fixed minimum free space amount or a dynamic percentage of the size of the largest table in the filegroup.
+Ensures that plenty of space is available for maintenance operations and minimizes auto-growth of data files during business hours, especially if instant file initialization (applicable to SQL 2005+) is not on.
+Can optionally override max autogrow settings and also optionally temporarily set a read-only filegroup to readwrite for growth, and then revert back to readonly.
+Run this in an overnight job, even if instant file initialization is on for SQL2005+, before any maintenance jobs, especially index defragmentation.
+This will work with SQL Server 2005 and 2008.
+Known weakness: If you have multiple files in a filegroup, it will expect the greater of MinFreeSpace or the entire percentage of the Largest Table available in each of the files of the filegroup.
+This is designed to run from a central administtrative database.
+
+Required Input Parameters:
+	none
+
+Optional Input Parameters:
+	@DatabaseID int=0,				ID of the database to grow the files in.  If omitted, the ID will be looked up from the name.  If both ID and name are provided, the ID takes precedence.
+	@DatabaseName sysname='',		Name of the database to grow the files in.  If omitted, the name will be looked up from the ID.  If both ID and name are omitted, the ID/Name of the current database is used.
+	@LargestTablePercent int=150,	The desired amount of free space as a percentage of the largest table in the file - if the largest table is 256MB and @LargestTablePercent is 200, then it will seek to have 512MB free in the file.
+	@MinFreeSpace int=64,			The fixed minimum free space in megabytes desired in the file, regardless of the size of the largest table.
+										Set to 0 if you want the largest table size to be the sole controlling factor in file growth.
+	@Granularity int=16,			If the desired size this proc wants to grow to is 920MB and @Granularity=256 (megabytes), then it will round up to the nearest full multple of 256MB -- 1024 MB.
+	@OverrideMaxSize bit=0,			If 1, and the desired size exceeds the maximum autogrow size, it will raise the maximum autogrow size to the size that it wants the file to grow to.  Otherwise it won't touch the file.
+	@OverrideReadOnly bit=0,		Allows growing or shrinking of files inside of READ_ONLY filegroups.
+	@AllowShrink bit=0,				If the file is over-size, allow a DBCC ShrinkFile to be issued. Recommend to be false as it will fragment the indexes and tables in the database files.
+										Re-growth will also more likely to result in more file fragments at the filesystem level.  But sometimes files can be grossly oversized with 90+% free space.
+	@ShrinkTruncateOnly bit=1		If @AllowShrink=1 and it wants to shrink a file, this will cause it not to move data pages.
+										Will not fragment tables and indexes, but it will very likely not shrink down to the desired size (LargestTable*@LargestTablePercent/100; round up to nearest whole mulitiple of @Granularity)
+
+Usage:
+	EXECUTE Admin.Util_BatchAutoGrow @DatabaseName='CalvaryHelps', @LargestTablePercent=200, @MinFreeSpace=256, @Granularity=64, @AllowShrink=0, @ShrinkTruncateOnly=0
+
+	DECLARE @SQL nVarChar(4000)
+	SET @SQL=''
+	SELECT @SQL=@SQL+'EXECUTE Admin.Util_BatchAutoGrow @DatabaseName=''' + name + ''', @LargestTablePercent=200, @MinFreeSpace=4, @Granularity=4, @AllowShrink=0, @ShrinkTruncateOnly=0' + CHAR(13)+CHAR(10)
+	FROM sys.databases
+	WHERE database_id>4
+	EXECUTE (@SQL)
+
+
+Copyright:
+	This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU Lesser General Public License as
+    published by the Free Software Foundation, either version 3 of the
+    License, or (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU Lesser General Public License for more details.
+
+    see <http://www.fsf.org/licensing/licenses/lgpl.html> for the license text.
+
+*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=
+*/
+
+CREATE PROCEDURE Admin.Util_BatchAutoGrow
+	@DatabaseID int=0,
+	@DatabaseName sysname='',
+	@LargestTablePercent int=150,
+	@MinFreeSpace int=64,
+	@Granularity int=16,
+	@OverrideMaxSize bit=0,
+	@OverrideReadOnly bit=0,
+	@AllowShrink bit=0,
+	@ShrinkTruncateOnly bit=1
+AS
+
+DECLARE @SQL nVarChar(4000)
+DECLARE @SQL2 nVarChar(4000)
+SET @SQL2=''
+
+SET @SQL='
+USE ' + @DatabaseName + '
+SELECT
+	@SQL2=@SQL2+CASE
+		WHEN ReadOnly=1 AND @OverrideReadOnly=1 AND (DesiredSize>Size AND (DesiredSize<MaxSize OR MaxSize<0 OR @OverrideMaxSize=1) OR Size>DesiredSize AND @AllowShrink=1) THEN
+			''ALTER DATABASE '' + DatabaseName + '' MODIFY FILEGROUP ['' + FilegroupName + ''] READ_WRITE;'' + Char(13)+Char(12)
+		ELSE ''''
+	END +
+	CASE
+		WHEN DesiredSize>Size AND (DesiredSize<MaxSize OR MaxSize<0 OR @OverrideMaxSize=1) AND (ReadOnly=0 OR @OverrideReadOnly=1) THEN
+			''ALTER DATABASE '' + DatabaseName + '' MODIFY FILE (NAME=N'''''' + LogicalName + '''''', SIZE='' + CONVERT(VarChar(20), DesiredSize*CONVERT(BigInt, 8)) + ''KB'' +
+			CASE WHEN DesiredSize>MaxSize AND MaxSize>0 THEN '', MAXSIZE='' + CONVERT(VarChar(20), DesiredSize*CONVERT(BigInt, 8)) + ''KB'' ELSE '''' END +
+			'');'' + Char(13)+Char(12)
+		ELSE ''''
+	END +
+	CASE
+		WHEN Size>DesiredSize AND @AllowShrink=1 AND (ReadOnly=0 OR @OverrideReadOnly=1) THEN
+			''DBCC ShrinkFile ('' + LogicalName + '', '' + CONVERT(VarChar(20), DesiredSize/128) + CASE WHEN @ShrinkTruncateOnly=1 THEN '', TRUNCATEONLY'' ELSE '''' END + '');'' + Char(13)+Char(10)
+		ELSE ''''
+	END +
+	CASE
+		WHEN ReadOnly=1 AND @OverrideReadOnly=1 AND (DesiredSize>Size AND (DesiredSize<MaxSize OR MaxSize<0 OR @OverrideMaxSize=1) OR Size>DesiredSize AND @AllowShrink=1) THEN
+			''ALTER DATABASE '' + DatabaseName + '' MODIFY FILEGROUP ['' + FilegroupName + ''] READ_ONLY;'' + Char(13)+Char(12)
+		ELSE ''''
+	END
+FROM
+	(
+		SELECT
+			DB_NAME() AS DatabaseName,
+			FilegroupName, LogicalName, PhysicalName, MaxSize AS MaxSize, ReadOnly,
+			Size AS Size, SpaceUsed AS SpaceUsed,
+			LargestTableSize AS LargestTableSize, DesiredFreeSpace AS DesiredFreeSpace,
+			(Size-SpaceUsed) AS SpaceFree,
+			CONVERT(bigint, SpaceUsed+DesiredFreeSpace) AS DesiredSize_NoRound,
+			CONVERT(bigint, (CONVERT(bigint, CONVERT(bigint, SpaceUsed+DesiredFreeSpace)/(@Granularity*128))+CONVERT(bigint, 1))*CONVERT(bigint, @Granularity*128)) AS DesiredSize
+		FROM
+			(
+				SELECT
+					database_files.name AS LogicalName, database_files.physical_name AS PhysicalName,
+					database_files.max_size AS MaxSize, database_files.is_read_only AS ReadOnly,
+					database_files.size AS Size, CONVERT(BigInt, FILEPROPERTY(database_files.name, ''SpaceUsed'')) AS SpaceUsed,
+					SpaceUsed.LargestTableSize AS LargestTableSize,
+					CONVERT(bigint, CASE
+						WHEN SpaceUsed.LargestTableSize*CONVERT(Numeric(19,6), @LargestTablePercent)/CONVERT(Numeric(19,6), 100)>@MinFreeSpace*128 THEN
+							SpaceUsed.LargestTableSize*CONVERT(Numeric(19,6), @LargestTablePercent)/CONVERT(Numeric(19,6), 100)
+						ELSE CONVERT(BigInt, @MinFreeSpace*128)
+					END) AS DesiredFreeSpace
+				FROM
+					(
+						SELECT data_space_id, MAX(TableSize) AS LargestTableSize
+						FROM
+							(
+								SELECT
+									allocation_units.data_space_id, partitions.object_id,
+									SUM(total_pages) AS TableSize
+								FROM
+									sys.allocation_units
+									JOIN sys.partitions ON
+										partitions.partition_id=allocation_units.container_id AND allocation_units.type IN (1,3)
+										OR partitions.hobt_id=allocation_units.container_id AND allocation_units.type=2
+								WHERE type>0
+								GROUP BY allocation_units.data_space_id, partitions.object_id
+							) AS SpaceUsed
+						GROUP BY data_space_id
+					) AS SpaceUsed
+					JOIN sys.database_files ON SpaceUsed.data_space_id=database_files.data_space_id
+			) AS SpaceUsed
+	) AS SpaceUsed
+'
+
+--PRINT @SQL
+EXECUTE sp_ExecuteSQL
+	@SQL,
+	N'@LargestTablePercent int, @MinFreeSpace int, @Granularity int, @OverrideMaxSize bit, @OverrideReadOnly bit, @AllowShrink bit, @ShrinkTruncateOnly bit, @SQL2 nVarChar(4000) OUTPUT',
+	@LargestTablePercent=@LargestTablePercent, @MinFreeSpace=@MinFreeSpace, @Granularity=@Granularity, @OverrideMaxSize=@OverrideMaxSize, @OverrideReadOnly=@OverrideReadOnly, @AllowShrink=@AllowShrink, @ShrinkTruncateOnly=@ShrinkTruncateOnly, @SQL2=@SQL2 OUTPUT
+
+--PRINT @SQL2
+EXECUTE (@SQL2)
+GO
+
+--*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=*=
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

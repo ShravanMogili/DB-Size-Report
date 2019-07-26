@@ -1,0 +1,44 @@
+DB object dependencies
+
+ The script will provide the list of all programmable DB objects and the objects being refered.
+
+The objective of the script is to have a map of your database dependencies in the form of view for debugging and analysis purpose.
+
+The known limitation all such methods is that we cannot dig in to map dependencies where dynamic queries are used.
+
+
+
+
+CREATE view [dbobject_dependency_mapping]
+as
+select 
+ referencing.*,
+ referenced.child_dbobject_id,
+ referenced.child_dbbobject_schema,
+ referenced.child_dbobject,
+ referenced.child_dbobject_type
+from
+(
+ select 
+  [object_id] [dbobject_id],
+  schema_name([schema_id]) [dbobject_schema],
+  name [dbobject],
+  type_desc [dbobject_type]
+ from sys.objects
+ where [type] not in ('D','IT','PK','SQ','UQ','U','S','TR')
+) referencing
+left outer join
+(
+ select 
+  id [parent_dbobject_id],
+  depid [child_dbobject_id],
+  schema_name([schema_id]) [child_dbbobject_schema],
+  name [child_dbobject],
+  type_desc [child_dbobject_type] 
+ from sysdepends 
+  join sys.objects
+   on [object_id] = depid
+ group by id,depid,[schema_id],name,type_desc
+) referenced
+ on referencing.dbobject_id = referenced.parent_dbobject_id
+

@@ -1,0 +1,96 @@
+A special feature of this solution is the use of CLR functions drive_info, without which it is difficult to do if you have a version of SQL Server younger than MS SQL 2008. I have a large number of SQL Servers version of SQL 2005 and I had to take advantage of a very good and detailed description of creating a function (https://www.mssqltips.com/sqlservertip/1986/sqlclr-function-to-return-free-space-for-all-drives-on-a-server/).
+
+**** The frequency of task start, choose according to your needs. For my task was enough to run once a day.
+
+USE [TEST]
+GO
+CREATE PROCEDURE [dbo].[SaveHistoryDBfileSize]
+	@ndays INT = 366	-- Delete records older than this number of days
+AS
+SET NOCOUNT ON;
+BEGIN
+	DECLARE @SQL NVARCHAR(MAX);
+	DECLARE @Message NVARCHAR(MAX);
+
+	BEGIN TRY
+	IF OBJECT_ID(N'[TEST].[dbo].[TblSaveHistoryDBfileSize]') IS NULL
+	BEGIN
+		CREATE TABLE [TEST].[dbo].[TblSaveHistoryDBfileSize]
+		(
+			[CurrentDate] DATETIME NULL
+			, [DBName] SYSNAME NOT NULL
+			, [database_id] INT NOT NULL
+			, [FileID] INT NULL
+			, [FileType] TINYINT NULL
+			, [LogicalName] SYSNAME NOT NULL
+			, [PhysicalName] NVARCHAR(260) NULL
+			, [FileSizeMB] DECIMAL(38, 0) NULL
+			, [MaxSize] INT NULL
+			, [PercentGrowthEnabled] BIT NULL
+			, [GrowthRate] INT NULL
+			, [Drive] NVARCHAR(1) NULL
+			, [FreeDiskSpaceGB] DECIMAL(38, 0) NULL
+		) ON [PRIMARY]
+	END
+
+	SET @SQL =
+	';WITH dbmf
+	AS
+	(
+	SELECT
+		GETDATE() AS [CurrentDate]
+		, db.[name] AS [DBName]
+		, mf.[database_id] AS [DataBaseID]
+		, mf.[file_id] AS [FileID]
+		, mf.[type] AS [FileType]
+		, mf.[name] AS [LogicalName]
+		, mf.[physical_name] AS [PhysicalName]
+		, CAST(mf.[size] AS DECIMAL(38, 0)/128. AS [FileSizeMB]
+		, mf.[max_size] AS [MaxSize]
+		, mf.[is_percent_growth] AS [PercentGrowthEnabled]
+		, mf.[growth] AS [GrowthRate]
+		, substring(mf.[physical_name],1,1) AS [Drive]
+	FROM sys.sysdatabases db
+	JOIN sys.master_files mf ON mf.database_id = db.[dbid]
+	--WHERE db.[dbid] > 4
+	)
+	SELECT
+		[CurrentDate]
+		, [DBName]
+		, [DatabaseID]
+		, [FileID]
+		, [FileType]
+		, [LogicalName]
+		, [PhysicalName]
+		, [FileSizeMB]
+		, [MaxSize]
+		, [PercentGrowthEnabled]
+		, [GrowthRate]
+		, [Drive]
+		, (SELECT free_mb
+			FROM [TEST].[dbo].drive_info()
+			WHERE letter = [Drive]
+			)/1024 AS FreeDiskSpaceGB
+	FROM dbmf
+	ORDER BY [DBName];'
+
+	INSERT [TEST].[dbo].[TblSaveHistoryDBfileSize]
+	EXEC (@SQL);
+
+	-- Delete old records ----------------------------------------
+	DELETE
+	FROM [TEST].[dbo].[TblSaveHistoryDBfileSize]
+	WHERE [CurrentDate] < DATEADD(day, -@ndays, GETDATE());
+	PRINT '---> Deleted ' + CAST(@@ROWCOUNT AS NVARCHAR) + '  records.';
+
+	END TRY
+
+	BEGIN CATCH
+		SET @Message = CHAR(13) + N'Error message: ' + ERROR_MESSAGE() + CAHAR(13) +
+		'Error number = ' + CAST(ERROR_NUMBER() AS NVARCHAR) + CHAR(13) +
+		'Error Procedure: ''' + ISNULL(ERROR_PROCEDURE(), N'---') + CHAR(13) +
+		'Error Line = ' + ISNULL(CAST(ERROR_LINE() AS NVARCHAR), N'---');
+		PRINT @Message;
+	END CATCH
+END
+

@@ -1,0 +1,23 @@
+create table #dbusedsize ( used_mb int)
+DECLARE @SQL VARCHAR(1000)
+DECLARE @DB sysname
+DECLARE curDB CURSOR FORWARD_ONLY STATIC FOR
+   SELECT [name]
+   FROM master..sysdatabases
+WHERE DATABASEPROPERTYEX(name, 'Status') = 'ONLINE'
+OPEN curDB
+FETCH NEXT FROM curDB INTO @DB
+WHILE @@FETCH_STATUS = 0
+   BEGIN
+       SELECT @SQL = 'USE [' + @DB +']' + CHAR(13) + 'INSERT INTO #dbusedsize( used_mb )
+select FILEPROPERTY([name], ''SpaceUsed'')/128
+from sysfiles sf left outer join sysfilegroups sfg on sf.groupid=sfg.groupid
+order by 1' + CHAR(13)
+       Exec (@SQL)
+       FETCH NEXT FROM curDB INTO @DB
+   END
+  
+CLOSE curDB
+DEALLOCATE curDB
+select SUM(used_mb) from #dbusedsize
+drop table #dbusedsize

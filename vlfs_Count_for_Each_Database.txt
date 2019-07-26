@@ -1,0 +1,54 @@
+--vlfs_Count_for_Each_Database
+
+--It's preety easy. Just copy and paste it in to the ssms window and run the script. The result will speak for itself. After copying the results, run the last portion (to delete the temp tables) again and make sure they are deleted
+
+
+
+
+
+
+
+
+CREATE TABLE #stage 
+(
+      FileID INT
+    , FileSize BIGINT
+    , StartOffset BIGINT
+    , FSeqNo BIGINT
+    , [Status] BIGINT
+    , Parity BIGINT
+    , CreateLSN NUMERIC(38) 
+) ;
+GO
+ 
+CREATE TABLE #results 
+(
+      Database_Name SYSNAME
+    , VLF_count INT 
+) ;
+GO
+
+EXEC sp_msforeachdb 
+      N'USE ?; 
+            INSERT INTO #stage 
+            EXEC sp_executeSQL N''DBCC LogInfo(?)''; 
+ 
+            INSERT INTO #results 
+            SELECT DB_NAME(), COUNT(*) 
+            FROM #stage; 
+ 
+            TRUNCATE TABLE #stage;'
+ 
+SELECT
+      *
+FROM
+      #results
+ORDER BY
+      VLF_count DESC ;
+GO
+
+DROP TABLE #stage ;
+GO
+DROP TABLE #results ;
+GO. 
+

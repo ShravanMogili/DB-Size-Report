@@ -1,0 +1,95 @@
+--Collect SQL Server database usage for free space and trending
+--https://www.mssqltips.com/sqlservertip/1426/collect-sql-server-database-usage-for-free-space-and-trending/
+
+Problem
+
+I have over 80 instances hosting 800+ databases that I support on my own. The only way I can keep track of all these databases is to centralize my monitoring so I have a single point of focus on my environment. I can not spend my entire day (and night) hopping from SQL instance to SQL instance in SQL Server Management Studio. I am not the only DBA out there in this situation. So overworked brothers and sisters, what are we to do? We cook up our own monitoring solution that best fits our environments. This tip is the first in a series presenting the building blocks of such a solution. My first tip will focus on monitoring database files and their free space on a single SQL instance.
+
+Solution
+
+I find it important in my environment to monitor the following database/database file level metrics:
+
+    Server/Instance Name
+    Database Name
+    Database File Names (both logical and full physical path)
+    File Size (In Megabytes)
+    Database Status
+    Recovery Mode
+    Free Space (In Megabytes and Percent) 
+
+To collect this information I need to tap into the either the master.dbo.sysfiles system table in SQL 2000 or master.sys.sysfiles compatibility view in SQL 2005. I also need to make use of a few T-SQL functions at the DBA's disposal. First, let me present the query. Afterwards I'll explain the finer points. 
+
+****************************************************************************************************************************************************************************************************
+
+
+DECLARE @DBInfo TABLE 
+( ServerName VARCHAR(100), 
+DatabaseName VARCHAR(100), 
+FileSizeMB INT, 
+LogicalFileName sysname, 
+PhysicalFileName NVARCHAR(520), 
+Status sysname, 
+Updateability sysname, 
+RecoveryMode sysname, 
+FreeSpaceMB INT, 
+FreeSpacePct VARCHAR(7), 
+FreeSpacePages INT, 
+PollDate datetime) 
+
+DECLARE @command VARCHAR(5000) 
+
+SELECT @command = 'Use [' + '?' + '] SELECT 
+@@servername as ServerName, 
+' + '''' + '?' + '''' + ' AS DatabaseName, 
+CAST(sysfiles.size/128.0 AS int) AS FileSize, 
+sysfiles.name AS LogicalFileName, sysfiles.filename AS PhysicalFileName, 
+CONVERT(sysname,DatabasePropertyEx(''?'',''Status'')) AS Status, 
+CONVERT(sysname,DatabasePropertyEx(''?'',''Updateability'')) AS Updateability, 
+CONVERT(sysname,DatabasePropertyEx(''?'',''Recovery'')) AS RecoveryMode, 
+CAST(sysfiles.size/128.0 - CAST(FILEPROPERTY(sysfiles.name, ' + '''' + 
+       'SpaceUsed' + '''' + ' ) AS int)/128.0 AS int) AS FreeSpaceMB, 
+CAST(100 * (CAST (((sysfiles.size/128.0 -CAST(FILEPROPERTY(sysfiles.name, 
+' + '''' + 'SpaceUsed' + '''' + ' ) AS int)/128.0)/(sysfiles.size/128.0)) 
+AS decimal(4,2))) AS varchar(8)) + ' + '''' + '%' + '''' + ' AS FreeSpacePct, 
+GETDATE() as PollDate FROM dbo.sysfiles' 
+INSERT INTO @DBInfo 
+   (ServerName, 
+   DatabaseName, 
+   FileSizeMB, 
+   LogicalFileName, 
+   PhysicalFileName, 
+   Status, 
+   Updateability, 
+   RecoveryMode, 
+   FreeSpaceMB, 
+   FreeSpacePct, 
+   PollDate) 
+EXEC sp_MSForEachDB @command 
+
+SELECT 
+   ServerName, 
+   DatabaseName, 
+   FileSizeMB, 
+   LogicalFileName, 
+   PhysicalFileName, 
+   Status, 
+   Updateability, 
+   RecoveryMode, 
+   FreeSpaceMB, 
+   FreeSpacePct, 
+   PollDate 
+FROM @DBInfo 
+ORDER BY 
+   ServerName, 
+   DatabaseName
+
+
+
+
+
+
+
+
+
+
+ 
